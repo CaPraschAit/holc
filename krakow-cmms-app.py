@@ -584,3 +584,13 @@ with tab6:
         
         st.bar_chart(pareto_data['Liczba Awarii'])
         st.caption("Pneumatyka i elektrozawory (np. EV16) generują blisko 50% wszystkich drobnych awarii w zakładzie.")
+- st.markdown("""
+- <style>
+-    .main-header { ... }
+- </style>
+- """, unsafe_style_html=True)
++ st.markdown("""
++ <style>
++    .main-header { ... }
++ </style>
++ """, unsafe_allow_html=True)
