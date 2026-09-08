@@ -1,8 +1,117 @@
+# krakow-cmms-app.py
 import streamlit as st
 import sqlite3
 import pandas as pd
 import datetime
 import os
+import textwrap
+
+# --- DATABASE SETUP: use file next to script and initialize if missing ---
+BASE_DIR = os.path.dirname(__file__)
+DB_PATH = os.path.join(BASE_DIR, "cmms.db")
+
+INIT_SQL = textwrap.dedent("""
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS assets (
+  id TEXT PRIMARY KEY,
+  code TEXT,
+  name TEXT,
+  section TEXT,
+  criticality TEXT,
+  status TEXT
+);
+
+CREATE TABLE IF NOT EXISTS parts (
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  location TEXT,
+  stock INTEGER,
+  min_stock INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  email TEXT PRIMARY KEY,
+  role TEXT,
+  sep_d TEXT,
+  sep_e TEXT
+);
+
+CREATE TABLE IF NOT EXISTS logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id TEXT,
+  user_email TEXT,
+  role TEXT,
+  all_ok INTEGER,
+  comments TEXT,
+  sep_signature TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS reactive_maintenance (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id TEXT,
+  description TEXT,
+  status TEXT,
+  priority TEXT,
+  assigned_role TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS part_transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  part_id TEXT,
+  quantity INTEGER,
+  asset_id TEXT,
+  user_email TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO assets (id, code, name, section, criticality, status) VALUES
+('NH-SM-09', 'C-1009', 'Mieszalnik NH-SM-09', 'Mieszalniki', 'Wysoka', 'Sprawny'),
+('NH-SM-47', 'C-1047', 'Odpylacz Pakowaczki NH-SM-47', 'Pakowaczki', 'Średnia', 'Sprawny'),
+('NH-MX-09', 'C-2009', 'Waga Popiołu W NH-MX-09', 'Wagi', 'Wysoka', 'Sprawny');
+
+INSERT OR IGNORE INTO parts (id, name, location, stock, min_stock) VALUES
+('PART-USZCZELKA-MIX', 'Uszczelka boczna Mix', 'Regał A1', 5, 2),
+('PART-WORKI-SM', 'Worki filtracyjne SM', 'Regał B3', 10, 5),
+('PART-ROLEK-TAŚMA', 'Rolek do taśmy suszarni', 'Regał C2', 2, 2);
+
+INSERT OR IGNORE INTO users (email, role, sep_d, sep_e) VALUES
+('wojciech.nowak@holcim.com', 'Technik Elektryk', 'D1/2671/129/25', 'E1/2672/129/25'),
+('dariusz.kowal@holcim.com', 'Technik', NULL, NULL),
+('planista@holcim.com', 'Planista', NULL, NULL);
+""")
+
+def init_db_if_missing():
+    if not os.path.exists(DB_PATH):
+        conn = sqlite3.connect(DB_PATH)
+        conn.executescript(INIT_SQL)
+        conn.commit()
+        conn.close()
+
+init_db_if_missing()
+
+def get_db_connection():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+def load_assets():
+    conn = get_db_connection()
+    try:
+        df = pd.read_sql_query("SELECT * FROM assets", conn)
+    except Exception:
+        df = pd.DataFrame(columns=['id','code','name','section','criticality','status'])
+    conn.close()
+    return df
+
+def load_parts():
+    conn = get_db_connection()
+    try:
+        df = pd.read_sql_query("SELECT * FROM parts", conn)
+    except Exception:
+        df = pd.DataFrame(columns=['id','name','location','stock','min_stock'])
+    conn.close()
+    return df
 
 # --- DESIGN PALETTE & PAGE SETUP ---
 st.set_page_config(
@@ -56,39 +165,21 @@ st.markdown("""
         font-size: 18px !important;
     }
 </style>
-""", unsafe_style_html=True)
-
-# Database helper functions
-DB_PATH = "cmms.db"
-if not os.path.exists(DB_PATH):
-    # Fallback to absolute workspace path if running in sandbox
-    DB_PATH = "/workspace/scratch/cmms.db"
-
-def get_db_connection():
-    return sqlite3.connect(DB_PATH)
-
-def load_assets():
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM assets", conn)
-    conn.close()
-    return df
-
-def load_parts():
-    conn = get_db_connection()
-    df = pd.read_sql_query("SELECT * FROM parts", conn)
-    conn.close()
-    return df
+""", unsafe_allow_html=True)
 
 # --- SIDEBAR: LOGIN & PROFILE SIMULATOR (RBAC) ---
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/e/e5/Holcim_logo.svg", width=180)
 st.sidebar.markdown("### 🔒 Logowanie CMMS: PF01_KRAKÓW")
 
-# Load registered users from database
+# Load registered users from database (safe fallback)
 conn = get_db_connection()
-users_df = pd.read_sql_query("SELECT email, role FROM users", conn)
+try:
+    users_df = pd.read_sql_query("SELECT email, role FROM users", conn)
+except Exception:
+    users_df = pd.DataFrame(columns=['email','role'])
 conn.close()
 
-user_list = users_df['email'].tolist()
+user_list = users_df['email'].tolist() if not users_df.empty else ["wojciech.nowak@holcim.com"]
 selected_user = st.sidebar.selectbox("Wybierz użytkownika:", user_list)
 
 # Get current user details
@@ -96,7 +187,14 @@ conn = get_db_connection()
 user_details = conn.execute("SELECT * FROM users WHERE email = ?", (selected_user,)).fetchone()
 conn.close()
 
-user_email, user_role, sep_d, sep_e = user_details
+if user_details:
+    user_email, user_role, sep_d, sep_e = user_details
+else:
+    # fallback user profile
+    user_email = selected_user
+    user_role = "Technik"
+    sep_d = None
+    sep_e = None
 
 st.sidebar.markdown(f"**Aktualna Rola:** `{user_role}`")
 if sep_d or sep_e:
@@ -109,7 +207,7 @@ st.sidebar.markdown("🌱 **Zakład:** `PF01_KRAKÓW (ul. Cementowa 2)`")
 st.sidebar.markdown("⏱️ **Czas systemowy:** " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 # Main App Header
-st.markdown(f"<div class='main-header'>PORTAL OPERACYJNO-WDROŻENIOWY CMMS: PF01_KRAKÓW</div>", unsafe_style_html=True)
+st.markdown(f"<div class='main-header'>PORTAL OPERACYJNO-WDROŻENIOWY CMMS: PF01_KRAKÓW</div>", unsafe_allow_html=True)
 
 # --- WEB TABS DEFINITION ---
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
@@ -135,14 +233,15 @@ with tab1:
     with col1:
         st.markdown("#### 🔍 Skanowanie QR / Wybór maszyny")
         # Simulating QR Scanner or dropdown list
-        section_filter = st.selectbox("Filtruj według Sekcji CMMS:", assets_df['section'].unique())
-        filtered_assets = assets_df[assets_df['section'] == section_filter]
+        section_options = assets_df['section'].unique().tolist() if not assets_df.empty else ["Ogólne"]
+        section_filter = st.selectbox("Filtruj według Sekcji CMMS:", section_options)
+        filtered_assets = assets_df[assets_df['section'] == section_filter] if not assets_df.empty else pd.DataFrame([{'id':'NH-SM-09','name':'Mieszalnik NH-SM-09','code':'C-1009','criticality':'Wysoka','status':'Sprawny'}])
         
         asset_options = [f"{row['id']} - {row['name']} ({row['code']})" for idx, row in filtered_assets.iterrows()]
         selected_asset_str = st.selectbox("Wybierz zasób (lub symuluj skan QR):", asset_options)
         
         selected_asset_id = selected_asset_str.split(" - ")[0]
-        asset_row = assets_df[assets_df['id'] == selected_asset_id].iloc[0]
+        asset_row = filtered_assets[filtered_assets['id'] == selected_asset_id].iloc[0]
         
         # Display Passport Card
         st.markdown(f"""
@@ -153,7 +252,7 @@ with tab1:
             <b>Krytyczność:</b> <span style='color: {"#dc2626" if asset_row['criticality'] == "Wysoka" else "#d97706" if asset_row['criticality'] == "Średnia" else "#0f766e"}'>{asset_row['criticality']}</span><br>
             <b>Bieżący Status:</b> <span style='font-weight: bold;'>{asset_row['status']}</span>
         </div>
-        """, unsafe_style_html=True)
+        """, unsafe_allow_html=True)
         
         # Interactive Knowledge Base
         with st.expander("📚 Podręczna baza wiedzy DTR & Schematy PDF"):
@@ -165,7 +264,7 @@ with tab1:
             elif "Rozdzielnia" in asset_row['name'] or "Podstacja" in asset_row['name']:
                 st.warning("⚠️ **BHP / LOTO:** Wymagane odłączenie zasilania i założenie kłódek blokady LOTO przed otwarciem drzwi rozdzielni!")
             else:
-                st.info("💡 Standardowa kontrola wizualna (*): Sprawdzenie śrub, szczelności połączeń elastycznych, osłon i stanu konstrukcji.")
+                st.info("💡 Standardowa kontrola wizualna (*): Sprawdzenie śrub, szczelności połączeń elastycznych, os��on i stanu konstrukcji.")
             
             st.markdown("🔗 **Schematy techniczne:**")
             st.button(f"📥 Pobierz Schemat Elektryczny {asset_row['id']}.pdf")
@@ -224,11 +323,11 @@ with tab1:
         parts_df = load_parts()
         matching_part = None
         if "Mieszalnik" in asset_row['name']:
-            matching_part = parts_df[parts_df['id'] == 'PART-USZCZELKA-MIX'].iloc[0]
+            matching_part = parts_df[parts_df['id'] == 'PART-USZCZELKA-MIX'].iloc[0] if not parts_df.empty and 'PART-USZCZELKA-MIX' in parts_df['id'].values else None
         elif "Odpylacz" in asset_row['name'] or "Filtr" in asset_row['name']:
-            matching_part = parts_df[parts_df['id'] == 'PART-WORKI-SM'].iloc[0]
+            matching_part = parts_df[parts_df['id'] == 'PART-WORKI-SM'].iloc[0] if not parts_df.empty and 'PART-WORKI-SM' in parts_df['id'].values else None
         elif "Suszarnia" in asset_row['name']:
-            matching_part = parts_df[parts_df['id'] == 'PART-ROLEK-TAŚMA'].iloc[0]
+            matching_part = parts_df[parts_df['id'] == 'PART-ROLEK-TAŚMA'].iloc[0] if not parts_df.empty and 'PART-ROLEK-TAŚMA' in parts_df['id'].values else None
             
         if matching_part is not None:
             st.info(f"Pasująca część: **{matching_part['name']}** | Lokalizacja w magazynie: `{matching_part['location']}` | Stan: `{matching_part['stock']} szt.`")
@@ -314,14 +413,14 @@ with tab2:
                 <b>STATUS SYSTEMU: ZABLOKOWANY</b><br>
                 Zapis protokołu jako pomyślny jest niemożliwy. System automatycznie utworzy zgłoszenie RM o najwyższym priorytecie i roześle alarmy.
             </div>
-            """, unsafe_style_html=True)
+            """, unsafe_allow_html=True)
         else:
             st.markdown("""
             <div style='background-color: #ecfdf5; border-left: 5px solid #10b981; padding: 15px; border-radius: 4px; color: #065f46;'>
                 ✅ <b>WAGA W NORMIE</b><br>
                 Odchyłka mieści się w dopuszczalnym zakresie +/- 2.00%. Kalibracja może zostać zatwierdzona.
             </div>
-            """, unsafe_style_html=True)
+            """, unsafe_allow_html=True)
             
         save_akp = st.button("💾 Zapisz Protokół Kalibracji", disabled=is_drift_critical and not st.checkbox("Chcę zgłosić awarię i wezwać AKP na kalibrację tensometrów"))
         
@@ -378,28 +477,31 @@ with tab3:
         st.markdown("#### 🏬 Aktualne Stany Magazynowe Części")
         
         # Display inventory in database with warning for low stock
-        for idx, row in parts_df.iterrows():
-            is_low_stock = row['stock'] <= row['min_stock']
-            status_text = "🟥 Niska dostępność!" if is_low_stock else "🟩 Dostępna"
-            
-            st.markdown(f"""
-            <div style='padding: 10px; background-color: {"#fef2f2" if is_low_stock else "#f8fafc"}; border: 1px solid #e2e8f0; border-radius: 4px; margin-bottom: 8px;'>
-                <b>{row['name']}</b> (ID: <code>{row['id']}</code>)<br>
-                📍 Lokalizacja: <b>{row['location']}</b> | Stan: <b>{row['stock']} szt.</b> (Próg min: {row['min_stock']} szt.) | Status: <b>{status_text}</b>
-            </div>
-            """, unsafe_style_html=True)
-            
-            # If stock low, auto-draft purchase order
-            if is_low_stock:
-                st.caption(f"📧 *System automatycznie wygenerował szkic zamówienia u dostawcy na {row['min_stock'] * 3} szt.*")
+        if parts_df.empty:
+            st.info("Brak rekordów części w bazie.")
+        else:
+            for idx, row in parts_df.iterrows():
+                is_low_stock = row['stock'] <= row['min_stock']
+                status_text = "🟥 Niska dostępność!" if is_low_stock else "🟩 Dostępna"
+                
+                st.markdown(f"""
+                <div style='padding: 10px; background-color: {"#fef2f2" if is_low_stock else "#f8fafc"}; border: 1px solid #e2e8f0; border-radius: 4px; margin-bottom: 8px;'>
+                    <b>{row['name']}</b> (ID: <code>{row['id']}</code>)<br>
+                    📍 Lokalizacja: <b>{row['location']}</b> | Stan: <b>{row['stock']} szt.</b> (Próg min: {row['min_stock']} szt.) | Status: <b>{status_text}</b>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # If stock low, auto-draft purchase order
+                if is_low_stock:
+                    st.caption(f"📧 *System automatycznie wygenerował szkic zamówienia u dostawcy na {row['min_stock'] * 3} szt.*")
 
     with col_wms2:
         st.markdown("#### 🛒 Szybki Koszyk (Pobranie części)")
         st.write("Pobierasz część z regału? Zarejestruj to natychmiast, aby zaktualizować stan w bazie danych.")
         
-        pobranie_part_id = st.selectbox("Wybierz część:", parts_df['id'].tolist())
+        pobranie_part_id = st.selectbox("Wybierz część:", parts_df['id'].tolist() if not parts_df.empty else ["PART-USZCZELKA-MIX"])
         pobranie_qty = st.number_input("Ilość do pobrania:", min_value=1, value=1)
-        pobranie_asset_id = st.selectbox("Dla jakiej maszyny?", load_assets()['id'].tolist())
+        pobranie_asset_id = st.selectbox("Dla jakiej maszyny?", load_assets()['id'].tolist() if not load_assets().empty else ["NH-SM-09"])
         
         pobierz_btn = st.button("📦 Potwierdź pobranie części")
         
@@ -408,7 +510,7 @@ with tab3:
             part_row = conn.execute("SELECT stock, name FROM parts WHERE id = ?", (pobranie_part_id,)).fetchone()
             
             if part_row and part_row[0] >= pobranie_qty:
-                # Secure transational decrement (Append-Only Log pattern)
+                # Secure transactional decrement (simple)
                 conn.execute("UPDATE parts SET stock = stock - ? WHERE id = ?", (pobranie_qty, pobranie_part_id))
                 conn.execute("""
                     INSERT INTO part_transactions (part_id, quantity, asset_id, user_email)
@@ -416,7 +518,7 @@ with tab3:
                 """, (pobranie_part_id, pobranie_qty, pobranie_asset_id, user_email))
                 conn.commit()
                 st.success(f"🎉 Pomyślnie zdjęto ze stanu {pobranie_qty} szt. części: **{part_row[1]}**!")
-                st.rerun()
+                st.experimental_rerun()
             else:
                 st.error("❌ Brak wystarczającej ilości części w magazynie!")
             conn.close()
@@ -430,12 +532,14 @@ with tab4:
     # KPIs ROW
     col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
     
-    # Calculate some metrics from DB
     conn = get_db_connection()
-    total_assets = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
-    critical_assets = conn.execute("SELECT COUNT(*) FROM assets WHERE status = 'Krytyczny'").fetchone()[0]
-    total_logs = conn.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
-    total_rm = conn.execute("SELECT COUNT(*) FROM reactive_maintenance").fetchone()[0]
+    try:
+        total_assets = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+        critical_assets = conn.execute("SELECT COUNT(*) FROM assets WHERE status = 'Krytyczny'").fetchone()[0]
+        total_logs = conn.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+        total_rm = conn.execute("SELECT COUNT(*) FROM reactive_maintenance").fetchone()[0]
+    except Exception:
+        total_assets = critical_assets = total_logs = total_rm = 0
     conn.close()
     
     with col_kpi1:
@@ -455,7 +559,6 @@ with tab4:
         st.markdown("#### 📅 Harmonogram Gantt & Obciążenie Zespołu")
         st.write("Przeciągaj zadania (drag-and-drop) i optymalizuj czas pracy techników (Wrench Time):")
         
-        # Simulated Gantt schedule
         gantt_df = pd.DataFrame({
             'Zadanie PPM': ['Rozdzielnie ST-1', 'Smarowanie Mixera', 'Filtry Pakowaczek', 'Suszarnia bęben', 'Wagi AKP'],
             'Planista': ['Wojciech (Elektryk)', 'Dariusz (Technik)', 'Dariusz (Technik)', 'Dariusz (Technik)', 'Dariusz (Technik)'],
@@ -469,21 +572,23 @@ with tab4:
         st.write("Kliknij przycisk, aby uruchomić test Strażnika Prewencji i sprawdzić, czy na liniach nie powstały krytyczne, tygodniowe zaległości.")
         
         if st.button("⚡ Uruchom procedurę testową Strażnika SLA"):
-            # Triggering our pre-built AppScript SLA alerting system logic
             st.markdown("""
             <div class='alert-panel'>
                 🚨 <b>KRYTYCZNY BRAK KONTROLI! (SLA WARN)</b><br>
                 System wykrył, że dla sekcji: <b>Suche Mieszanki (ID: NH-SM-01 do 47)</b> nie zarejestrowano żadnego codziennego przeglądu od <b>8 dni!</b><br>
                 <i>Wysłano pilny raport alarmowy na e-mail: krzysztof.fiema@holcim.com (Plant Manager) oraz bartlomiej.pyza@holcim.com (Planista).</i>
             </div>
-            """, unsafe_style_html=True)
+            """, unsafe_allow_html=True)
 
     with col_dash2:
         st.markdown("#### 📝 Rejestr Zgłoszeń i Awarii (RM)")
         st.write("Bieżące zgłoszenia wymagające reakcji ze strony utrzymania ruchu:")
         
         conn = get_db_connection()
-        rm_df = pd.read_sql_query("SELECT id, asset_id, description, priority, status FROM reactive_maintenance ORDER BY id DESC", conn)
+        try:
+            rm_df = pd.read_sql_query("SELECT id, asset_id, description, priority, status FROM reactive_maintenance ORDER BY id DESC", conn)
+        except Exception:
+            rm_df = pd.DataFrame()
         conn.close()
         
         if rm_df.empty:
@@ -496,7 +601,7 @@ with tab4:
                     Opis: {row['description']}<br>
                     Priorytet: <b>{row['priority']}</b> | Status: <b>{row['status']}</b>
                 </div>
-                """, unsafe_style_html=True)
+                """, unsafe_allow_html=True)
 
 # ==========================================
 # TAB 5: PDF REPORT COMPILER
@@ -508,7 +613,7 @@ with tab5:
     col_rep1, col_rep2 = st.columns(2)
     
     with col_rep1:
-        report_date = st.date_input("Wybierz datę raportu:", value=datetime.date(2026, 9, 7))
+        report_date = st.date_input("Wybierz datę raportu:", value=datetime.date.today())
         report_type = st.selectbox("Typ zestawienia:", ["Karta Przeglądu Dziennego", "Miesięczne Zamknięcie PPM", "Ewidencja Kalibracji AKP"])
         
         st.markdown("##### ⚙️ Zaawansowane filtry generowania:")
@@ -516,11 +621,8 @@ with tab5:
         hide_all_ok = st.checkbox("Nie pokazuj rutynowych punktów (tylko anomalie)", value=False)
         
         st.markdown("---")
-        # Generates simulated preview or points to download the pre-built PDF
         st.markdown("📥 **Pobierz gotowy, zweryfikowany plik PDF z polskimi znakami:**")
         st.caption("Poniższy plik został skompilowany z pełnym polskim kodowaniem czcionek w standardzie inżynieryjnym.")
-        
-        # Link to our compiled PDF in Studio
         st.info("Pobierz gotowy raport: **karta-przegladu-automatyczna-v2.pdf** z panelu Studio po prawej stronie!")
 
     with col_rep2:
@@ -547,7 +649,7 @@ with tab5:
             <hr>
             <center><i>Dokument wygenerowany automatycznie przez System CMMS Holcim. Podpisy zatwierdzone cyfrowo.</i></center>
         </div>
-        """, unsafe_style_html=True)
+        """, unsafe_allow_html=True)
 
 # ==========================================
 # TAB 6: AI PREDICTIONS & ANALYTICS
@@ -584,13 +686,3 @@ with tab6:
         
         st.bar_chart(pareto_data['Liczba Awarii'])
         st.caption("Pneumatyka i elektrozawory (np. EV16) generują blisko 50% wszystkich drobnych awarii w zakładzie.")
-- st.markdown("""
-- <style>
--    .main-header { ... }
-- </style>
-- """, unsafe_style_html=True)
-+ st.markdown("""
-+ <style>
-+    .main-header { ... }
-+ </style>
-+ """, unsafe_allow_html=True)
